@@ -267,18 +267,29 @@ class ZeroSubstrate:
     """
 
     def __init__(self, max_receipts: int = 10_000,
-                 cache_dir: Optional[str] = None):
+                 cache_dir: Optional[str] = None,
+                 mode: str = "memory"):
         """
         Args:
             max_receipts: Maximum number of receipts to store.
                          LRU eviction when exceeded.
-            cache_dir:   Optional path to a directory for disk persistence.
-                         Receipts are saved on every new computation and
-                         loaded automatically on startup. All workers
-                         pointing at the same directory share the cache.
+            cache_dir:   Path for disk persistence. Required when
+                         mode='disk' or mode='hybrid'.
+            mode:        Cache mode:
+                         'memory' — in-process only, resets on restart (default)
+                         'disk'   — persist to cache_dir, no in-memory copy
+                                    (low RAM, shared across workers)
+                         'hybrid' — in-memory for speed + persisted to disk
+                                    (fastest reads, survives restarts)
         """
+        if mode not in ("memory", "disk", "hybrid"):
+            raise ValueError(f"mode must be 'memory', 'disk', or 'hybrid', got {mode!r}")
+        if mode in ("disk", "hybrid") and not cache_dir:
+            raise ValueError(f"cache_dir is required when mode={mode!r}")
+
         self.max_receipts = max_receipts
         self.cache_dir    = cache_dir
+        self.mode         = mode
         self._receipts: dict[str, dict] = {}
         self._access_order: list[str]   = []
         self._hits   = 0
@@ -287,6 +298,7 @@ class ZeroSubstrate:
 
         if cache_dir:
             os.makedirs(cache_dir, exist_ok=True)
+        if mode in ("disk", "hybrid"):
             self._load_from_disk()
 
     # ------------------------------------------------------------------
@@ -461,6 +473,8 @@ class ZeroSubstrate:
             "hit_rate":         self._hits / max(total, 1),
             "receipts_stored":  len(self._receipts),
             "total_time_s":     round(self._total_time_s, 6),
+            "mode":             self.mode,
+            "cache_dir":        self.cache_dir,
         }
 
     def reset_stats(self):
@@ -489,16 +503,17 @@ class ZeroSubstrate:
         return hashlib.sha256(key.encode()).hexdigest()[:32] + ".pkl"
 
     def _store(self, key: str, data: dict):
+        # all modes: keep in-process for fast repeated calls within same session
         if len(self._receipts) >= self.max_receipts:
-            # LRU eviction
             oldest = self._access_order.pop(0)
             self._receipts.pop(oldest, None)
         self._receipts[key] = data
         self._access_order.append(key)
-        if self.cache_dir:
+
+        # disk and hybrid: persist atomically
+        if self.mode in ("disk", "hybrid"):
             path = os.path.join(self.cache_dir, self._key_to_filename(key))
             payload = {"version": _CACHE_VERSION, "key": key, "data": data}
-            # Atomic write: temp file → rename (safe if process dies mid-write)
             tmp_fd, tmp_path = tempfile.mkstemp(dir=self.cache_dir, suffix=".tmp")
             try:
                 with os.fdopen(tmp_fd, "wb") as f:

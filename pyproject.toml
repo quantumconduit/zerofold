@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "zerofold"
-version = "0.1.4"
+version = "0.1.5"
 description = "Deterministic compute cache for SVD and PCA — lossless, 100-300x faster on repeated calls (same matrix)"
 readme = "README.md"
 requires-python = ">=3.9"

@@ -1,6 +1,6 @@
 # ZeroFold
 
-**Stop recomputing SVD. Cache it once, get it back in microseconds forever.**
+**100–300× faster on repeated calls (same matrix) — lossless, deterministic, zero bit difference.**
 
 ```bash
 pip install zerofold
@@ -58,7 +58,7 @@ A deterministic compute cache for expensive linear algebra operations.
 python -X utf8 benchmark.py
 ```
 
-### Test 1 — Same matrix: first call vs retrieval
+### Test 1 — Same matrix repeated calls: first call vs retrieval
 
 | n    | First call | Retrieval | Speedup |
 |------|-----------|-----------|---------|

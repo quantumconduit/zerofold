@@ -244,7 +244,7 @@ def run():
     from zerofold.pca import classify_role
 
     test_cases = [
-        ("completion", np.eye(64) + 1e-4 * rng5.standard_normal((64, 64))),
+        ("completion", np.diag(rng5.standard_normal(64))),
         ("prime",      (lambda A: (A + A.T)/2 + 0.1*np.eye(128))(rng5.standard_normal((128,128)))),
         ("composite",  rng5.standard_normal((256, 256))),
     ]

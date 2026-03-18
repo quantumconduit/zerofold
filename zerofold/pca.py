@@ -74,12 +74,12 @@ from scipy.linalg import eigh
 # Role detection (O(1) structural classification)
 # ---------------------------------------------------------------------------
 
-def _is_completion_like(M: np.ndarray, tol: float = 1e-3) -> bool:
-    """Near-identity / diagonal — answer is structurally obvious."""
-    d    = np.diag(M)
-    off  = M - np.diag(d)
-    denom = max(1e-12, norm(M, "fro"))
-    return norm(off, "fro") / denom < tol
+def _is_completion_like(M: np.ndarray) -> bool:
+    """Exactly diagonal — every off-diagonal element is exactly zero.
+    The diagonal shortcut is only lossless for exact diagonal matrices.
+    Any off-diagonal noise, however small, routes to composite (full SVD)."""
+    d = np.diag(M)
+    return np.array_equal(M, np.diag(d))
 
 
 def _is_prime_like(M: np.ndarray,

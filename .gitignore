@@ -1,8 +1,7 @@
+# ── Python artifacts ──────────────────────────────────────────────────
 __pycache__/
 *.py[cod]
-*.pyd
 *.pyo
-*.so
 *.egg
 *.egg-info/
 dist/
@@ -12,8 +11,43 @@ build/
 .venv
 env/
 venv/
+
+# ── Benchmark outputs ─────────────────────────────────────────────────
 *.csv
 *.png
-*.zip
+*.svg
+
+# ── OS / IDE ──────────────────────────────────────────────────────────
 desktop.ini
 .ipynb_checkpoints/
+*.zip
+
+# ── Research / private files (NOT for public repo) ────────────────────
+*.pdf
+*.ipynb
+Tests and Framework/
+analysis_mining_opportunity.md
+comprehensive_analysis.md
+computational_infrastructure_roadmap.md
+implementation_cost_analysis.md
+omega_complete_strategic_analysis.md
+paradigm_shift_analysis.md
+unified_substrate_architecture.md
+zero_field_complete_analysis.md
+prime_fold.py
+mermaid-diagram.svg
+ZeroGate__Appended.pdf
+Zero_Substrate.pdf
+ZeroField_Router_Repro.ipynb
+SIU_Framework_Validation.ipynb
+PoW_Colab_Simulator.ipynb
+
+# ── Core source — kept private, compiled for PyPI wheel ───────────────
+zerofold/zsse.py
+zerofold/collapse.py
+
+# ── Compiled binaries — included when present ─────────────────────────
+!zerofold/_zsse_core*.pyd
+!zerofold/_zsse_core*.so
+!zerofold/_collapse_core*.pyd
+!zerofold/_collapse_core*.so

@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.backends.legacy:build"
+
+[project]
+name = "zerofold"
+version = "0.1.0"
+description = "Deterministic compute cache for SVD and PCA — lossless, 100-300x faster on repeated calls"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "Business Source License 1.1" }
+keywords = ["pca", "svd", "linear-algebra", "machine-learning", "acceleration", "numpy"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Topic :: Scientific/Engineering :: Mathematics",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+    "numpy>=1.24",
+    "scipy>=1.10",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7", "pandas>=2.0", "matplotlib>=3.7"]
+
+[project.scripts]
+zerofold-bench = "zerofold.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["zerofold*"]

@@ -1,0 +1,27 @@
+Business Source License 1.1
+
+Licensor: Jaxson Baylor
+Licensed Work: ZeroFold
+Change Date: 2027-01-01
+Change License: Apache License, Version 2.0
+
+Use Limitation:
+    The Licensed Work may not be used in production by any entity with
+    annual gross revenue exceeding $1,000,000 USD, or by any entity that
+    provides the Licensed Work (or a substantially similar product) as a
+    hosted or managed service to third parties, without a separate
+    commercial license from the Licensor.
+
+    Contact: [your email] for commercial licensing inquiries.
+
+Terms:
+    The Licensor hereby grants you the right to copy, modify, create
+    derivative works, redistribute, and make non-production use of the
+    Licensed Work.
+
+    Effective on the Change Date, the Licensor grants you rights under
+    the terms of the Change License (Apache 2.0), and the above Use
+    Limitation no longer applies.
+
+    For the full text of the Business Source License 1.1, see:
+    https://mariadb.com/bsl11/

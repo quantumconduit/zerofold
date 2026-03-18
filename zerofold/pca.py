@@ -60,6 +60,7 @@ from __future__ import annotations
 import hashlib
 import os
 import pickle
+import tempfile
 import time
 from dataclasses import dataclass
 from typing import Optional
@@ -111,6 +112,9 @@ def classify_role(M: np.ndarray) -> str:
 # Prime-structured matrix key (substrate index)
 # ---------------------------------------------------------------------------
 
+# Bump this when receipt format changes — old disk caches invalidate cleanly
+_CACHE_VERSION = 2
+
 # Small primes for key construction (first 32)
 _KEY_PRIMES = [
     2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37,
@@ -143,9 +147,13 @@ def _prime_structured_key(M: np.ndarray, n_components: Optional[int]) -> str:
     )
 
     # Full byte hash for collision resistance
-    byte_hash = hashlib.sha256(M.tobytes()).hexdigest()[:16]
+    # Hash contiguous bytes — ensure consistent layout regardless of memory order
+    byte_hash = hashlib.sha256(np.ascontiguousarray(M).tobytes()).hexdigest()[:16]
 
-    return f"{m}x{n}_k{n_components}_{pmod:016x}_{byte_hash}"
+    # Include dtype so float32 and float64 views of same values never collide
+    dtype_str = M.dtype.str  # e.g. '<f8', '<f4'
+
+    return f"{m}x{n}_k{n_components}_{dtype_str}_{pmod:016x}_{byte_hash}"
 
 
 # ---------------------------------------------------------------------------
@@ -193,6 +201,7 @@ class SVDResult:
     time_s:      float
     from_receipt: bool
     n_components: int
+    cache_layer: str = "none"  # "none" | "memory" | "disk"
 
     def reconstruct(self) -> np.ndarray:
         return self.U @ np.diag(self.S) @ self.Vt
@@ -210,6 +219,7 @@ class PCAResult:
     time_s:               float
     from_receipt:         bool
     n_components:         int
+    cache_layer:          str = "none"  # "none" | "memory" | "disk"
 
     def transform(self, X: np.ndarray) -> np.ndarray:
         return (X - self.mean) @ self.components.T
@@ -307,10 +317,11 @@ class ZeroSubstrate:
         if key in self._receipts:
             # ── Receipt hit: O(1) return ─────────────────────────────
             self._hits += 1
-            r   = self._receipts[key]
-            dt  = time.perf_counter() - t0
+            r     = self._receipts[key]
+            dt    = time.perf_counter() - t0
             self._total_time_s += dt
             self._touch(key)
+            layer = "disk" if r.get("_from_disk") else "memory"
             return SVDResult(
                 U=r["U"], S=r["S"], Vt=r["Vt"],
                 algorithm="receipt",
@@ -318,6 +329,7 @@ class ZeroSubstrate:
                 time_s=dt,
                 from_receipt=True,
                 n_components=n_components,
+                cache_layer=layer,
             )
 
         # ── Miss: compute exactly, store receipt ──────────────────────
@@ -385,10 +397,11 @@ class ZeroSubstrate:
 
         if key in self._receipts:
             self._hits += 1
-            r   = self._receipts[key]
-            dt  = time.perf_counter() - t0
+            r     = self._receipts[key]
+            dt    = time.perf_counter() - t0
             self._total_time_s += dt
             self._touch(key)
+            layer = "disk" if r.get("_from_disk") else "memory"
             return PCAResult(
                 components=r["components"],
                 explained_var=r["explained_var"],
@@ -400,6 +413,7 @@ class ZeroSubstrate:
                 time_s=dt,
                 from_receipt=True,
                 n_components=n_components,
+                cache_layer=layer,
             )
 
         self._misses += 1
@@ -483,8 +497,18 @@ class ZeroSubstrate:
         self._access_order.append(key)
         if self.cache_dir:
             path = os.path.join(self.cache_dir, self._key_to_filename(key))
-            with open(path, "wb") as f:
-                pickle.dump({"key": key, "data": data}, f, protocol=4)
+            payload = {"version": _CACHE_VERSION, "key": key, "data": data}
+            # Atomic write: temp file → rename (safe if process dies mid-write)
+            tmp_fd, tmp_path = tempfile.mkstemp(dir=self.cache_dir, suffix=".tmp")
+            try:
+                with os.fdopen(tmp_fd, "wb") as f:
+                    pickle.dump(payload, f, protocol=4)
+                os.replace(tmp_path, path)
+            except Exception:
+                try:
+                    os.remove(tmp_path)
+                except OSError:
+                    pass
 
     def _load_from_disk(self):
         for fname in os.listdir(self.cache_dir):
@@ -494,8 +518,13 @@ class ZeroSubstrate:
             try:
                 with open(path, "rb") as f:
                     entry = pickle.load(f)
+                # Version check — skip stale receipts from old format
+                if entry.get("version") != _CACHE_VERSION:
+                    os.remove(path)
+                    continue
                 key  = entry["key"]
                 data = entry["data"]
+                data["_from_disk"] = True
                 self._receipts[key] = data
                 self._access_order.append(key)
             except Exception:

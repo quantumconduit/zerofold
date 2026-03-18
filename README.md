@@ -130,6 +130,13 @@ print(substrate.stats())
 # {'hits': 8, 'misses': 2, 'hit_rate': 0.8, 'receipts_stored': 2}
 
 substrate.clear()  # evict all cached results
+
+# Disk persistence — survives restarts, shared across workers
+substrate = ZeroSubstrate(cache_dir="/tmp/zerofold_cache")
+r = substrate.svd(X, n_components=64)  # computed + saved to disk
+# restart process, new worker, same cache_dir:
+substrate2 = ZeroSubstrate(cache_dir="/tmp/zerofold_cache")
+r2 = substrate2.svd(X, n_components=64)  # loaded from disk, from_receipt=True
 ```
 
 ---

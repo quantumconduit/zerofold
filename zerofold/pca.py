@@ -58,6 +58,8 @@ Usage:
 from __future__ import annotations
 
 import hashlib
+import os
+import pickle
 import time
 from dataclasses import dataclass
 from typing import Optional
@@ -254,18 +256,28 @@ class ZeroSubstrate:
         print(substrate.stats())
     """
 
-    def __init__(self, max_receipts: int = 10_000):
+    def __init__(self, max_receipts: int = 10_000,
+                 cache_dir: Optional[str] = None):
         """
         Args:
             max_receipts: Maximum number of receipts to store.
                          LRU eviction when exceeded.
+            cache_dir:   Optional path to a directory for disk persistence.
+                         Receipts are saved on every new computation and
+                         loaded automatically on startup. All workers
+                         pointing at the same directory share the cache.
         """
         self.max_receipts = max_receipts
+        self.cache_dir    = cache_dir
         self._receipts: dict[str, dict] = {}
         self._access_order: list[str]   = []
         self._hits   = 0
         self._misses = 0
         self._total_time_s = 0.0
+
+        if cache_dir:
+            os.makedirs(cache_dir, exist_ok=True)
+            self._load_from_disk()
 
     # ------------------------------------------------------------------
     # SVD
@@ -443,14 +455,24 @@ class ZeroSubstrate:
         self._total_time_s = 0.0
 
     def clear(self):
-        """Clear all stored receipts."""
+        """Clear all stored receipts (memory and disk)."""
         self._receipts.clear()
         self._access_order.clear()
         self.reset_stats()
+        if self.cache_dir:
+            for f in os.listdir(self.cache_dir):
+                if f.endswith(".pkl"):
+                    try:
+                        os.remove(os.path.join(self.cache_dir, f))
+                    except OSError:
+                        pass
 
     # ------------------------------------------------------------------
     # Internal
     # ------------------------------------------------------------------
+
+    def _key_to_filename(self, key: str) -> str:
+        return hashlib.sha256(key.encode()).hexdigest()[:32] + ".pkl"
 
     def _store(self, key: str, data: dict):
         if len(self._receipts) >= self.max_receipts:
@@ -459,6 +481,25 @@ class ZeroSubstrate:
             self._receipts.pop(oldest, None)
         self._receipts[key] = data
         self._access_order.append(key)
+        if self.cache_dir:
+            path = os.path.join(self.cache_dir, self._key_to_filename(key))
+            with open(path, "wb") as f:
+                pickle.dump({"key": key, "data": data}, f, protocol=4)
+
+    def _load_from_disk(self):
+        for fname in os.listdir(self.cache_dir):
+            if not fname.endswith(".pkl"):
+                continue
+            path = os.path.join(self.cache_dir, fname)
+            try:
+                with open(path, "rb") as f:
+                    entry = pickle.load(f)
+                key  = entry["key"]
+                data = entry["data"]
+                self._receipts[key] = data
+                self._access_order.append(key)
+            except Exception:
+                pass  # corrupt file — skip silently
 
     def _touch(self, key: str):
         try:

@@ -68,6 +68,10 @@ def is_completion_like(M: np.ndarray, tol: float = 1e-3) -> bool:
 
     Detection: off-diagonal Frobenius norm < tol * total Frobenius norm.
     """
+    # BUG 1+2 FIX: non-square and 1D inputs crashed (broadcast mismatch /
+    # invalid fro norm on vectors). Return False — they route to COMPOSITE.
+    if M.ndim != 2 or M.shape[0] != M.shape[1]:
+        return False
     d    = np.diag(M)
     off  = M - np.diag(d)
     denom = max(1e-12, norm(M, ord="fro"))
@@ -75,15 +79,23 @@ def is_completion_like(M: np.ndarray, tol: float = 1e-3) -> bool:
 
 
 def is_prime_like(M: np.ndarray,
-                  tol_sym: float = 1e-6,
-                  tol_cond: float = 1e8,
+                  tol_sym: float = 1e-4,
+                  tol_cond: float = 1e10,
                   min_shift: float = 1e-3) -> bool:
     """
     True if M is symmetric and well-conditioned.
     Primes are stable resonance anchors — answer derivable from eigenbasis.
 
     Detection: symmetry check + condition number proxy < tol_cond.
+
+    BUG 7 FIX: original thresholds (tol_sym=1e-6, tol_cond=1e8) were too
+    strict — only perfectly uniform matrices fired as PRIME. Real ML matrices
+    (attention weights, covariance, Gram) are approximately symmetric.
+    Relaxed to tol_sym=1e-4 / tol_cond=1e10 to capture realistic workloads.
+    BUG 1+2 FIX: shape guard added.
     """
+    if M.ndim != 2 or M.shape[0] != M.shape[1]:
+        return False
     fro = max(1e-12, norm(M, ord="fro"))
     if norm(M - M.T, ord="fro") / fro >= tol_sym:
         return False
@@ -98,7 +110,15 @@ def is_prime_like(M: np.ndarray,
 
 
 def classify_matrix(M: np.ndarray) -> Role:
-    """Classify matrix into one of three roles (O(1) structural check)."""
+    """
+    Classify matrix into one of three roles (O(1) structural check).
+
+    Accepts any numpy array:
+    - Square 2D matrices: classified as COMPLETION, PRIME, or COMPOSITE
+    - Non-square 2D or 1D inputs: always COMPOSITE (no crash)
+    """
+    if not isinstance(M, np.ndarray):
+        return Role.COMPOSITE
     if is_completion_like(M):
         return Role.COMPLETION
     if is_prime_like(M):
@@ -114,18 +134,38 @@ def _compute_completion(M: np.ndarray) -> float:
     """
     Completion path (1W): near-diagonal — product of diagonal is det.
     Energy: O(n) trivial, negligible.
+    Uses log-space to avoid overflow on large n (BUG 5 FIX).
     """
-    return float(np.prod(np.clip(np.diag(M), -1e8, 1e8)))
+    d = np.diag(M)
+    if np.any(d == 0):
+        return 0.0
+    signs = np.sign(d)
+    log_abs = np.log(np.abs(d) + 1e-300)
+    return float(np.prod(signs) * np.exp(np.clip(np.sum(log_abs), -700, 700)))
 
 
 def _compute_prime(M: np.ndarray) -> float:
     """
-    Prime path (5W): symmetric — det = product of eigenvalues.
-    eigh is 2-3× faster than general det for symmetric matrices.
+    Prime path (5W): symmetric matrix — eigenbasis computation.
+
+    Tries Cholesky first (SPD symmetric — O(n³/3), ~2x faster than LU).
+    Falls back to eigh for symmetric matrices that are not positive definite.
+    Both paths exploit the symmetric structure — eigh is the natural eigenbasis
+    path from the paper, Cholesky is its SPD specialization.
+    det(A) via Cholesky: det(L)^2 = exp(2 * sum(log(diag(L))))
     """
-    w = eigh(M, eigvals_only=True)
-    w = np.clip(w, -1e8, 1e8)
-    return float(np.prod(w))
+    try:
+        L = np.linalg.cholesky(M)
+        log_det = 2.0 * np.sum(np.log(np.abs(np.diag(L)) + 1e-300))
+        return float(np.exp(np.clip(log_det, -700, 700)))
+    except np.linalg.LinAlgError:
+        # Not positive definite — use eigh (general symmetric eigenbasis)
+        w = eigh(M, eigvals_only=True)
+        if np.any(w == 0):
+            return 0.0
+        signs = np.sign(w)
+        log_abs = np.log(np.abs(w) + 1e-300)
+        return float(np.prod(signs) * np.exp(np.clip(np.sum(log_abs), -700, 700)))
 
 
 def _compute_composite(M: np.ndarray) -> float:
@@ -140,8 +180,40 @@ def _compute_composite(M: np.ndarray) -> float:
 
 
 def _compute_baseline(M: np.ndarray) -> float:
-    """Baseline: numpy general det (200W path, always available)."""
-    return float(np.linalg.det(M))
+    """
+    Baseline: numpy general det (200W path, always available).
+    BUG 5 FIX: np.linalg.det overflows to ±inf for n≥256 random matrices.
+    slogdet computes in log-space, no overflow.
+    """
+    sign, logdet = np.linalg.slogdet(M)
+    if sign == 0:
+        return 0.0
+    return float(sign * np.exp(np.clip(logdet, -700, 700)))
+
+
+# ---------------------------------------------------------------------------
+# Role fingerprint — fast O(1) key for role cache
+# ---------------------------------------------------------------------------
+
+def _matrix_fingerprint(M: np.ndarray):
+    """
+    Cheap structural fingerprint for role cache lookup.
+    Only defined for square 2D arrays — non-square is always COMPOSITE,
+    no caching needed. Samples shape + dtype + 3 diagonal positions + partial trace.
+    Much faster than running classify_matrix on every repeated call.
+    """
+    if not isinstance(M, np.ndarray) or M.ndim != 2 or M.shape[0] != M.shape[1]:
+        return None
+    n   = M.shape[0]
+    mid = n // 2
+    return (
+        n,
+        M.dtype.str,
+        round(float(M[0,   0  ]), 9),
+        round(float(M[mid, mid]), 9),
+        round(float(M[-1,  -1 ]), 9),
+        round(float(np.sum(np.diag(M)[:min(8, n)])), 7),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -191,13 +263,23 @@ class ZeroFoldRouter:
             Role.COMPOSITE:  _compute_composite,
         }
         # Stats accumulated per session
-        self._counts: dict[Role, int]  = {r: 0 for r in Role}
+        self._counts: dict[Role, int]   = {r: 0 for r in Role}
         self._energy: dict[Role, float] = {r: 0.0 for r in Role}
         self._time:   dict[Role, float] = {r: 0.0 for r in Role}
+        # Role cache: fingerprint → Role, O(1) classification on repeated matrices
+        self._role_cache: dict[tuple, Role] = {}
+        self._role_cache_hits = 0
 
     def query_det(self, M: np.ndarray) -> QueryResult:
         """Route a determinant query through the minimum-energy path."""
-        role   = classify_matrix(M)
+        fp   = _matrix_fingerprint(M)
+        if fp is not None and fp in self._role_cache:
+            role = self._role_cache[fp]
+            self._role_cache_hits += 1
+        else:
+            role = classify_matrix(M)
+            if fp is not None:
+                self._role_cache[fp] = role
         watts  = self.watts[role]
         fn     = self._compute[role]
 
@@ -218,11 +300,13 @@ class ZeroFoldRouter:
         total_energy  = sum(self._energy.values())
         total_time    = sum(self._time.values())
         return {
-            "total_queries": total_queries,
-            "total_energy_J": total_energy,
-            "total_time_s": total_time,
-            "counts": {r.value: self._counts[r] for r in Role},
-            "energy_by_role_J": {r.value: self._energy[r] for r in Role},
+            "total_queries":      total_queries,
+            "total_energy_J":     total_energy,
+            "total_time_s":       total_time,
+            "counts":             {r.value: self._counts[r] for r in Role},
+            "energy_by_role_J":   {r.value: self._energy[r] for r in Role},
+            "role_cache_hits":    self._role_cache_hits,
+            "role_cache_size":    len(self._role_cache),
         }
 
     def reset_stats(self):
@@ -230,6 +314,7 @@ class ZeroFoldRouter:
             self._counts[r] = 0
             self._energy[r] = 0.0
             self._time[r]   = 0.0
+        self._role_cache_hits = 0
 
 
 # ---------------------------------------------------------------------------
@@ -238,12 +323,13 @@ class ZeroFoldRouter:
 
 def _gen_matrix(n: int, role: Role) -> np.ndarray:
     if role == Role.COMPLETION:
-        return np.eye(n) + 1e-4 * np.random.randn(n, n)
+        # 1e-5 noise keeps off-diagonal ratio safely below tol=1e-3 at all sizes
+        return np.diag(np.random.randn(n)) + 1e-5 * np.random.randn(n, n)
     if role == Role.PRIME:
+        # Gram-style SPD: realistic PRIME workload (covariance, kernel, Hessian)
+        # A @ A.T is always SPD; /n scales eigenvalues, + I ensures full rank
         A = np.random.randn(n, n)
-        M = (A + A.T) / 2.0
-        M += max(1e-3, n * 1e-4) * np.eye(n)
-        return M
+        return (A @ A.T) / n + np.eye(n)
     return np.random.randn(n, n)
 
 
@@ -251,11 +337,14 @@ def _make_workload(n: int, total: int,
                    mix: dict | None = None) -> list[tuple[np.ndarray, Role]]:
     if mix is None:
         mix = ROLE_MIX_DEFAULT
-    roles = np.random.choice(
-        [Role.COMPLETION, Role.PRIME, Role.COMPOSITE],
-        size=total,
-        p=[mix["completion"], mix["prime"], mix["composite"]]
-    )
+    # BUG 3 FIX: np.random.choice converts Role enums to numpy strings which
+    # fail equality checks in _gen_matrix, causing every matrix to fall through
+    # to COMPOSITE regardless of intended role. Python random.choices preserves
+    # enum identity.
+    import random
+    role_list = [Role.COMPLETION, Role.PRIME, Role.COMPOSITE]
+    weights   = [mix["completion"], mix["prime"], mix["composite"]]
+    roles     = random.choices(role_list, weights=weights, k=total)
     return [(_gen_matrix(n, r), r) for r in roles]
 
 
@@ -284,13 +373,20 @@ class BenchResult:
 
     def summary(self) -> str:
         base_kwh, rout_kwh = self.daily_kwh()
+        # BUG 6 FIX: wall-time speedup and energy reduction measure different
+        # things. Printing them together without labels was misleading — a
+        # slower router (speedup < 1) could still show high energy reduction
+        # because energy = time * watts_per_role (1/5/10W vs 200W baseline),
+        # not measured physical energy. Both are now labeled explicitly.
+        wall_tag = "FASTER" if self.speedup_x >= 1.0 else "SLOWER (cold run / all-composite workload)"
         return (
             f"n={self.n} | total={self.total}\n"
-            f"  Speedup:          {self.speedup_x:.2f}×\n"
-            f"  Energy reduction: {self.energy_reduction_pct:.1f}%\n"
-            f"  Role counts:      {self.counts}\n"
-            f"  Avg ms/role:      { {k: f'{v:.3f}' for k,v in self.avg_ms_by_role.items()} }\n"
-            f"  Daily kWh (1B q): baseline={base_kwh:,.1f}  router={rout_kwh:,.1f}  "
+            f"  Wall-time speedup:  {self.speedup_x:.2f}x  [{wall_tag}]\n"
+            f"  Energy reduction:   {self.energy_reduction_pct:.1f}%"
+            f"  [power-lane model: 1/5/10W vs 200W baseline — not measured energy]\n"
+            f"  Role counts:        {self.counts}\n"
+            f"  Avg ms/role:        { {k: f'{v:.3f}' for k,v in self.avg_ms_by_role.items()} }\n"
+            f"  Daily kWh (1B q):   baseline={base_kwh:,.1f}  router={rout_kwh:,.1f}  "
             f"savings={100*(1 - rout_kwh/max(base_kwh,1e-12)):.1f}%"
         )
 

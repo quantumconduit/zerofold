@@ -83,9 +83,11 @@ def _is_completion_like(M: np.ndarray) -> bool:
 
 
 def _is_prime_like(M: np.ndarray,
-                   tol_sym: float  = 1e-6,
-                   tol_cond: float = 1e8) -> bool:
-    """Symmetric, well-conditioned — answer derivable via eigenbasis (exact)."""
+                   tol_sym: float  = 1e-4,
+                   tol_cond: float = 1e10) -> bool:
+    """Symmetric, well-conditioned — answer derivable via eigenbasis (exact).
+    Thresholds match router.py: relaxed to capture real ML matrices
+    (covariance, Gram, attention weights) not just perfectly uniform ones."""
     fro = max(1e-12, norm(M, "fro"))
     if norm(M - M.T, "fro") / fro >= tol_sym:
         return False
@@ -461,6 +463,135 @@ class ZeroSubstrate:
         )
 
     # ------------------------------------------------------------------
+    # Solve — Ax = b
+    # ------------------------------------------------------------------
+
+    def solve(self, A: np.ndarray, b: np.ndarray) -> np.ndarray:
+        """
+        Role-aware, receipt-cached linear system solve: Ax = b.
+
+        Role routing:
+          Completion → diagonal solve O(n): x = b / diag(A)
+          Prime (SPD) → Cholesky solve O(n²): fastest for positive-definite
+          Prime (sym) → eigh-based solve: exploits eigenbasis
+          Composite   → LU solve: numpy.linalg.solve
+
+        Receipt caches the inverse implicitly — same A, different b uses
+        the stored factorization path without re-classifying.
+
+        Returns:
+            x: np.ndarray solution vector or matrix
+        """
+        key = "solve_" + _prime_structured_key(A, None)
+        t0  = time.perf_counter()
+
+        if key in self._receipts:
+            self._hits += 1
+            r  = self._receipts[key]
+            dt = time.perf_counter() - t0
+            self._total_time_s += dt
+            self._touch(key)
+            # Apply stored factorization to new b
+            role = r["role"]
+            if role == "completion":
+                return b / r["diag"]
+            elif role == "prime_spd":
+                from scipy.linalg import cho_solve
+                return cho_solve(r["factor"], b)
+            elif role == "prime_sym":
+                w, Q = r["factor"]
+                return Q @ (Q.T @ b / w[:, None] if b.ndim > 1 else Q.T @ b / w)
+            else:
+                from scipy.linalg import lu_solve
+                return lu_solve(r["factor"], b)
+
+        # Miss: compute factorization, store receipt
+        self._misses += 1
+        role = classify_role(A)
+        receipt = {"role": role}
+
+        if role == "completion":
+            d = np.diag(A)
+            receipt["diag"]   = d
+            receipt["role"]   = "completion"
+            x = b / d
+        else:
+            # Try Cholesky (SPD prime)
+            try:
+                from scipy.linalg import cho_factor, cho_solve
+                cf = cho_factor(A)
+                receipt["factor"] = cf
+                receipt["role"]   = "prime_spd"
+                x = cho_solve(cf, b)
+            except Exception:
+                if role == "prime":
+                    # General symmetric — eigh factorization
+                    w, Q = eigh(A)
+                    receipt["factor"] = (w, Q)
+                    receipt["role"]   = "prime_sym"
+                    x = Q @ (Q.T @ b / w[:, None] if b.ndim > 1 else Q.T @ b / w)
+                else:
+                    from scipy.linalg import lu_factor, lu_solve
+                    luf = lu_factor(A)
+                    receipt["factor"] = luf
+                    receipt["role"]   = "composite"
+                    x = lu_solve(luf, b)
+
+        dt = time.perf_counter() - t0
+        self._total_time_s += dt
+        self._store(key, receipt)
+        return x
+
+    # ------------------------------------------------------------------
+    # Inv — matrix inverse
+    # ------------------------------------------------------------------
+
+    def inv(self, A: np.ndarray) -> np.ndarray:
+        """
+        Role-aware, receipt-cached matrix inverse.
+
+        Role routing:
+          Completion → O(n): 1 / diag(A) rebuilt as diagonal matrix
+          Prime (SPD) → Cholesky inverse: most stable for positive-definite
+          Prime (sym) → eigh inverse: Q @ diag(1/w) @ Q.T
+          Composite   → LU inverse: numpy.linalg.inv
+
+        Returns:
+            A_inv: np.ndarray inverse matrix
+        """
+        key = "inv_" + _prime_structured_key(A, None)
+        t0  = time.perf_counter()
+
+        if key in self._receipts:
+            self._hits += 1
+            r  = self._receipts[key]
+            dt = time.perf_counter() - t0
+            self._total_time_s += dt
+            self._touch(key)
+            return r["inv"]
+
+        self._misses += 1
+        role = classify_role(A)
+
+        if role == "completion":
+            A_inv = np.diag(1.0 / np.diag(A))
+        elif role == "prime":
+            try:
+                from scipy.linalg import cho_factor, cho_solve
+                cf    = cho_factor(A)
+                A_inv = cho_solve(cf, np.eye(A.shape[0]))
+            except Exception:
+                w, Q  = eigh(A)
+                A_inv = Q @ np.diag(1.0 / w) @ Q.T
+        else:
+            A_inv = np.linalg.inv(A)
+
+        dt = time.perf_counter() - t0
+        self._total_time_s += dt
+        self._store(key, {"inv": A_inv, "role": role})
+        return A_inv
+
+    # ------------------------------------------------------------------
     # Stats
     # ------------------------------------------------------------------
 
@@ -594,3 +725,22 @@ def substrate_stats() -> dict:
 def clear_substrate():
     """Clear global substrate receipts."""
     _global_substrate.clear()
+
+
+def solve(A: np.ndarray, b: np.ndarray) -> np.ndarray:
+    """
+    Zero-substrate linear system solve via global substrate.
+
+    Drop-in for numpy.linalg.solve. Role-aware. Receipt-cached.
+    Same A, different b: factorization reused from receipt (no re-classify).
+    """
+    return _global_substrate.solve(A, b)
+
+
+def inv(A: np.ndarray) -> np.ndarray:
+    """
+    Zero-substrate matrix inverse via global substrate.
+
+    Drop-in for numpy.linalg.inv. Role-aware. Receipt-cached.
+    """
+    return _global_substrate.inv(A)
